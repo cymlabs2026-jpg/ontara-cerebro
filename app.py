@@ -177,7 +177,9 @@ with st.sidebar:
         if st.button("🔄 Actualizar cerebro", width="stretch", type="primary"):
             carpetas = [c.strip().strip('"') for c in texto_carpetas.splitlines() if c.strip()]
             faltantes = [c for c in carpetas if not os.path.isdir(c)]
-            if faltantes:
+            if not carpetas:
+                st.error("Escribe al menos una carpeta. Para sacar documentos del cerebro usa la pestaña Gestionar.")
+            elif faltantes:
                 st.error("No existen estas carpetas:\n\n" + "\n".join(faltantes))
             else:
                 config["carpetas"] = carpetas
