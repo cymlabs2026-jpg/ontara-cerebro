@@ -13,7 +13,7 @@ from html import unescape
 
 EXTENSIONES = (".pdf", ".docx", ".pptx", ".xlsx", ".xlsm", ".txt", ".csv", ".md", ".html", ".htm")
 CARPETAS_IGNORADAS = {"00_Ontara_Cerebro", "13_Telegram_Unigram", "node_modules", ".git",
-                      "__pycache__", "AppData", "_files", "Ontara_Cerebro"}
+                      "__pycache__", "AppData", "_files", "Ontara_Cerebro", "Ontara_Cargas", "Ontara_Cerebro_Panel"}
 PALABRAS_POR_FRAGMENTO = 350
 SOLAPE = 60
 
@@ -143,7 +143,11 @@ class Cerebro:
             CREATE VIRTUAL TABLE IF NOT EXISTS fragmentos USING fts5(
                 ruta UNINDEXED, nombre, texto, orden UNINDEXED,
                 tokenize = "unicode61 remove_diacritics 2");
+            CREATE TABLE IF NOT EXISTS excluidos(ruta TEXT PRIMARY KEY, fecha TEXT);
         """)
+
+    def excluidos(self):
+        return {r for (r,) in self.bd.execute("SELECT ruta FROM excluidos")}
 
     # -- inventario
     @staticmethod
@@ -158,7 +162,8 @@ class Cerebro:
 
     def actualizar(self, raices, carpeta_ocr=None, progreso=None):
         """Indexa archivos nuevos o modificados y borra los que ya no existen."""
-        archivos = list(self.listar_archivos(raices))
+        bloqueados = self.excluidos()
+        archivos = [(r, a) for r, a in self.listar_archivos(raices) if a not in bloqueados]
         conocidos = {r: (m, t) for r, m, t in self.bd.execute(
             "SELECT ruta, mtime, tamano FROM documentos")}
         vistos, nuevos, errores = set(), 0, 0
@@ -172,21 +177,8 @@ class Cerebro:
                 continue
             if progreso:
                 progreso(i / len(archivos), os.path.basename(ruta))
-            error = None
-            try:
-                texto = extraer_texto(ruta, carpeta_ocr, raiz)
-            except Exception as ex:  # archivo dañado o protegido
-                texto, error = "", str(ex)[:200]
+            if not self._indexar(raiz, ruta, st, carpeta_ocr):
                 errores += 1
-            nombre = os.path.basename(ruta)
-            carpeta = os.path.relpath(os.path.dirname(ruta), raiz)
-            self.bd.execute("DELETE FROM fragmentos WHERE ruta = ?", (ruta,))
-            for orden, frag in enumerate(fragmentar(texto)):
-                self.bd.execute("INSERT INTO fragmentos VALUES (?,?,?,?)",
-                                (ruta, nombre, frag, orden))
-            self.bd.execute("INSERT OR REPLACE INTO documentos VALUES (?,?,?,?,?,?,?,?)",
-                            (ruta, raiz, nombre, carpeta, st.st_mtime, st.st_size,
-                             len(texto.split()), error))
             nuevos += 1
             if nuevos % 25 == 0:
                 self.bd.commit()
@@ -197,6 +189,65 @@ class Cerebro:
         self.bd.commit()
         return {"revisados": len(archivos), "nuevos": nuevos, "borrados": len(borrados),
                 "errores": errores}
+
+    def _indexar(self, raiz, ruta, st, carpeta_ocr=None):
+        error = None
+        try:
+            texto = extraer_texto(ruta, carpeta_ocr, raiz)
+        except Exception as ex:  # archivo dañado o protegido
+            texto, error = "", str(ex)[:200]
+        nombre = os.path.basename(ruta)
+        carpeta = os.path.relpath(os.path.dirname(ruta), raiz)
+        self.bd.execute("DELETE FROM fragmentos WHERE ruta = ?", (ruta,))
+        for orden, frag in enumerate(fragmentar(texto)):
+            self.bd.execute("INSERT INTO fragmentos VALUES (?,?,?,?)", (ruta, nombre, frag, orden))
+        self.bd.execute("INSERT OR REPLACE INTO documentos VALUES (?,?,?,?,?,?,?,?)",
+                        (ruta, raiz, nombre, carpeta, st.st_mtime, st.st_size, len(texto.split()), error))
+        return error is None
+
+    def indexar_archivo(self, raiz, ruta, carpeta_ocr=None):
+        """Lee un solo archivo (por ejemplo, uno recién cargado desde la app)."""
+        self.bd.execute("DELETE FROM excluidos WHERE ruta = ?", (ruta,))
+        ok = self._indexar(raiz, ruta, os.stat(ruta), carpeta_ocr)
+        self.bd.commit()
+        return ok
+
+    def quitar(self, rutas):
+        """Saca documentos del cerebro sin tocar el archivo; no vuelven a leerse."""
+        import datetime
+        hoy = datetime.date.today().isoformat()
+        for r in rutas:
+            self.bd.execute("DELETE FROM fragmentos WHERE ruta = ?", (r,))
+            self.bd.execute("DELETE FROM documentos WHERE ruta = ?", (r,))
+            self.bd.execute("INSERT OR REPLACE INTO excluidos VALUES (?, ?)", (r, hoy))
+        self.bd.commit()
+
+    def olvidar(self, rutas):
+        """Borra del índice documentos cuyo archivo ya se eliminó (sin marcarlos como excluidos)."""
+        for r in rutas:
+            self.bd.execute("DELETE FROM fragmentos WHERE ruta = ?", (r,))
+            self.bd.execute("DELETE FROM documentos WHERE ruta = ?", (r,))
+        self.bd.commit()
+
+    def reincluir(self, rutas):
+        for r in rutas:
+            self.bd.execute("DELETE FROM excluidos WHERE ruta = ?", (r,))
+        self.bd.commit()
+
+    def lista_excluidos(self):
+        return self.bd.execute("SELECT ruta, fecha FROM excluidos ORDER BY fecha DESC").fetchall()
+
+    def documentos(self):
+        filas = self.bd.execute("""SELECT ruta, nombre, carpeta, palabras, mtime, tamano, error
+                                   FROM documentos ORDER BY mtime DESC""").fetchall()
+        salida = []
+        for ruta, nombre, carpeta, palabras, mtime, tamano, error in filas:
+            area = re.split(r"[\\/]", carpeta)[0] if carpeta not in (".", "") else "(raíz)"
+            salida.append({"ruta": ruta, "nombre": nombre, "area": area, "carpeta": carpeta,
+                           "tipo": os.path.splitext(nombre)[1].lower().lstrip("."),
+                           "palabras": palabras, "mtime": mtime, "tamano": tamano,
+                           "legible": palabras >= 20, "error": error})
+        return salida
 
     def estadisticas(self):
         docs, palabras = self.bd.execute(

@@ -133,6 +133,9 @@ if "config" not in st.session_state:
     st.session_state.clave = "" if DEMO else clave_del_dueno()
     st.session_state.preguntas = 0
 config = st.session_state.config
+if not DEMO:
+    from paneles import asegurar_cargas
+    asegurar_cargas(config, guardar_config)
 CLAVE_DUENO = clave_del_dueno() if DEMO else ""
 
 
@@ -171,7 +174,7 @@ with st.sidebar:
         st.markdown("**Carpetas que lee el cerebro**")
         texto_carpetas = st.text_area("Una carpeta por línea", "\n".join(config["carpetas"]), height=90,
                                       label_visibility="collapsed")
-        if st.button("🔄 Actualizar cerebro", use_container_width=True, type="primary"):
+        if st.button("🔄 Actualizar cerebro", width="stretch", type="primary"):
             carpetas = [c.strip().strip('"') for c in texto_carpetas.splitlines() if c.strip()]
             faltantes = [c for c in carpetas if not os.path.isdir(c)]
             if faltantes:
@@ -219,7 +222,7 @@ with st.sidebar:
         st.caption("🟢 Modo respuestas con Claude" if clave else "🟡 Modo búsqueda (sin clave de API)")
 
     st.divider()
-    if st.button("🗑️ Nueva conversación", use_container_width=True):
+    if st.button("🗑️ Nueva conversación", width="stretch"):
         st.session_state.mensajes = []
         st.rerun()
     if not DEMO:
@@ -295,63 +298,82 @@ else:
     EJEMPLOS = ["¿Qué fechas tiene el retiro de Emaús?", "Resúmeme lo que tengo sobre teoría de la burocracia",
                 "¿Qué es el slotting y dónde lo explico?", "¿Qué documentos tengo sobre finanzas personales?"]
 
-if datos["documentos"] == 0:
-    st.markdown('<div class="tarjeta"><b>Bienvenido 👋</b><br>Revisa las carpetas en la barra lateral y '
-                'pulsa <b>Actualizar cerebro</b> para que lea tus documentos por primera vez. '
-                'Según cuántos tengas, puede tardar unos minutos.</div>', unsafe_allow_html=True)
-elif not st.session_state.mensajes:
-    st.markdown("**Prueba con preguntas como:**")
-    cols = st.columns(2)
-    for i, e in enumerate(EJEMPLOS):
-        if cols[i % 2].button(e, key=f"ej{i}", use_container_width=True):
-            st.session_state.pendiente = e
-            st.rerun()
+if DEMO:
+    tab_chat, tab_panel = st.tabs(["💬 Preguntar", "📊 Panel"])
+    tab_cargar = tab_gestion = None
+else:
+    tab_chat, tab_cargar, tab_gestion, tab_panel = st.tabs(
+        ["💬 Preguntar", "📥 Cargar", "🗂️ Gestionar", "📊 Panel"])
 
-for n, m in enumerate(st.session_state.mensajes):
-    with st.chat_message("user" if m["rol"] == "user" else "assistant",
-                         avatar="🧑" if m["rol"] == "user" else "🧠"):
-        st.markdown(m["texto"])
-        if m["rol"] == "assistant":
-            mostrar_fuentes(m.get("fuentes", []), m.get("pregunta", ""), n)
+with tab_chat:
+    if datos["documentos"] == 0:
+        st.markdown('<div class="tarjeta"><b>Bienvenido 👋</b><br>Revisa las carpetas en la barra lateral y '
+                    'pulsa <b>Actualizar cerebro</b> para que lea tus documentos por primera vez. '
+                    'Según cuántos tengas, puede tardar unos minutos.</div>', unsafe_allow_html=True)
+    elif not st.session_state.mensajes:
+        st.markdown("**Prueba con preguntas como:**")
+        cols = st.columns(2)
+        for i, e in enumerate(EJEMPLOS):
+            if cols[i % 2].button(e, key=f"ej{i}", width="stretch"):
+                st.session_state.pendiente = e
+                st.rerun()
 
-pregunta = st.chat_input("Escribe tu pregunta…") or st.session_state.pop("pendiente", None)
-if pregunta:
-    historial = list(st.session_state.mensajes)
-    st.session_state.mensajes.append({"rol": "user", "texto": pregunta})
-    with st.chat_message("user", avatar="🧑"):
-        st.markdown(pregunta)
+    for n, m in enumerate(st.session_state.mensajes):
+        with st.chat_message("user" if m["rol"] == "user" else "assistant",
+                             avatar="🧑" if m["rol"] == "user" else "🧠"):
+            st.markdown(m["texto"])
+            if m["rol"] == "assistant":
+                mostrar_fuentes(m.get("fuentes", []), m.get("pregunta", ""), n)
 
-    fuentes = cerebro.buscar(pregunta)
-    if len(fuentes) < 3 and historial:  # pregunta de seguimiento: usa el contexto anterior
-        previa = next((m["texto"] for m in reversed(historial) if m["rol"] == "user"), "")
-        fuentes = cerebro.buscar(previa + " " + pregunta)
+    pregunta = st.chat_input("Escribe tu pregunta…") or st.session_state.pop("pendiente", None)
+    if pregunta:
+        historial = list(st.session_state.mensajes)
+        st.session_state.mensajes.append({"rol": "user", "texto": pregunta})
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(pregunta)
 
-    with st.chat_message("assistant", avatar="🧠"):
-        if limite_alcanzado():
-            texto = respuesta_sin_clave(fuentes, f"Llegaste al límite de {MAX_PREGUNTAS_DEMO} respuestas de esta demo. "
-                                                 "Te muestro los documentos relacionados. ¿Quieres Ontara Cerebro "
-                                                 "para tu empresa? Escríbenos a C&M Labs.")
-            st.markdown(texto)
-        elif clave_activa() and fuentes:
-            try:
-                texto = st.write_stream(preguntar_a_claude(pregunta, fuentes, historial))
-                st.session_state.preguntas += 1
-            except Exception as ex:  # clave inválida, sin saldo o sin internet
-                nombre = type(ex).__name__
-                aviso = {"AuthenticationError": "La clave de API no es válida.",
-                         "PermissionDeniedError": "La clave no tiene permiso. Revisa la cuenta en platform.claude.com.",
-                         "RateLimitError": "Se alcanzó el límite de uso por ahora. Espera un momento e intenta de nuevo.",
-                         "APIConnectionError": "No hay conexión a internet o el servicio no responde.",
-                         "BadRequestError": "La solicitud fue rechazada (revisa que la cuenta de la API tenga saldo)."}
-                texto = "⚠️ " + aviso.get(nombre, f"Ocurrió un error: {ex}") + "\n\n" + respuesta_sin_clave(fuentes)
+        fuentes = cerebro.buscar(pregunta)
+        if len(fuentes) < 3 and historial:  # pregunta de seguimiento: usa el contexto anterior
+            previa = next((m["texto"] for m in reversed(historial) if m["rol"] == "user"), "")
+            fuentes = cerebro.buscar(previa + " " + pregunta)
+
+        with st.chat_message("assistant", avatar="🧠"):
+            if limite_alcanzado():
+                texto = respuesta_sin_clave(fuentes, f"Llegaste al límite de {MAX_PREGUNTAS_DEMO} respuestas de esta demo. "
+                                                     "Te muestro los documentos relacionados. ¿Quieres Ontara Cerebro "
+                                                     "para tu empresa? Escríbenos a C&M Labs.")
                 st.markdown(texto)
-        else:
-            texto = respuesta_sin_clave(fuentes)
-            st.markdown(texto)
-        n = len(st.session_state.mensajes)
-        mostrar_fuentes(fuentes, pregunta, n)
-    st.session_state.mensajes.append({"rol": "assistant", "texto": texto, "fuentes": fuentes,
-                                      "pregunta": pregunta})
+            elif clave_activa() and fuentes:
+                try:
+                    texto = st.write_stream(preguntar_a_claude(pregunta, fuentes, historial))
+                    st.session_state.preguntas += 1
+                except Exception as ex:  # clave inválida, sin saldo o sin internet
+                    nombre = type(ex).__name__
+                    aviso = {"AuthenticationError": "La clave de API no es válida.",
+                             "PermissionDeniedError": "La clave no tiene permiso. Revisa la cuenta en platform.claude.com.",
+                             "RateLimitError": "Se alcanzó el límite de uso por ahora. Espera un momento e intenta de nuevo.",
+                             "APIConnectionError": "No hay conexión a internet o el servicio no responde.",
+                             "BadRequestError": "La solicitud fue rechazada (revisa que la cuenta de la API tenga saldo)."}
+                    texto = "⚠️ " + aviso.get(nombre, f"Ocurrió un error: {ex}") + "\n\n" + respuesta_sin_clave(fuentes)
+                    st.markdown(texto)
+            else:
+                texto = respuesta_sin_clave(fuentes)
+                st.markdown(texto)
+            n = len(st.session_state.mensajes)
+            mostrar_fuentes(fuentes, pregunta, n)
+        st.session_state.mensajes.append({"rol": "assistant", "texto": texto, "fuentes": fuentes,
+                                          "pregunta": pregunta})
+
+from paneles import pestana_cargar, pestana_gestionar, pestana_panel  # noqa: E402
+
+if tab_cargar is not None:
+    with tab_cargar:
+        pestana_cargar(cerebro, config, guardar_config)
+    with tab_gestion:
+        pestana_gestionar(cerebro, abrir, config)
+with tab_panel:
+    pestana_panel(cerebro, DEMO, DATOS)
+
 
 if DEMO:
     st.markdown('<div class="pie">Ontara Cerebro · un producto de C&M Labs · Palmira, Valle del Cauca</div>',
